@@ -1,14 +1,14 @@
 name: Deploy to Hetzner VPS
 
 on:
-  push:
-    branches:
-      - main
-    paths-ignore:
-      - 'README*.md'
-      - 'docs/**'
-      - '.github/**'
-      - '*.md'
+  # push:  # DESABILITADO até configurar GitHub Secrets
+  #   branches:
+  #     - main
+  #   paths-ignore:
+  #     - 'README*.md'
+  #     - 'docs/**'
+  #     - '.github/**'
+  #     - '*.md'
   workflow_dispatch:
     inputs:
       environment:
