@@ -1,0 +1,119 @@
+version: '3.9'
+
+services:
+  lightrag:
+    container_name: lightrag
+    image: ghcr.io/hkuds/lightrag:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      tags:
+        - ghcr.io/hkuds/lightrag:latest
+      cache_from:
+        - type: local
+          src: /tmp/docker-cache
+      cache_to:
+        - type: local
+          dest: /tmp/docker-cache
+
+    # Networking
+    ports:
+      - "${PORT:-9621}:9621"
+    networks:
+      - lightrag-network
+
+    # Volume mounts for persistence
+    volumes:
+      - lightrag-data:/app/data/rag_storage
+      - lightrag-inputs:/app/data/inputs
+      - ./config.ini:/app/config.ini:ro
+      - ./.env:/app/.env:ro
+
+    # Environment configuration
+    env_file:
+      - .env
+
+    # Resource limits and reservations
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 2G
+
+    # Restart policy
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9621/health", "||", "exit", "1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "10"
+        labels: "service=lightrag"
+
+    # Extra hosts for local development
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+
+  # Optional: Reverse proxy with Nginx (uncomment if needed)
+  # nginx:
+  #   image: nginx:latest
+  #   container_name: lightrag-nginx
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./nginx.conf:/etc/nginx/nginx.conf:ro
+  #     - ./ssl:/etc/nginx/ssl:ro
+  #   depends_on:
+  #     - lightrag
+  #   networks:
+  #     - lightrag-network
+  #   restart: unless-stopped
+  #   logging:
+  #     driver: "json-file"
+  #     options:
+  #       max-size: "100m"
+  #       max-file: "10"
+
+volumes:
+  lightrag-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_VOLUME_PATH:-/opt/lightrag/data/rag_storage}
+
+  lightrag-inputs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${INPUTS_VOLUME_PATH:-/opt/lightrag/data/inputs}
+
+networks:
+  lightrag-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.0.0/16
