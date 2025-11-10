@@ -93,7 +93,7 @@ services:
     stop_grace_period: 30s
 
     healthcheck:
-      test: ["CMD-SHELL", "cypher-shell -a neo4j://neo4j:7687 'RETURN 1' 2>/dev/null || exit 1"]
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:7474 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
