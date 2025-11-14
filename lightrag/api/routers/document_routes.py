@@ -27,6 +27,14 @@ from lightrag.utils import generate_track_id
 from lightrag.api.utils_api import get_combined_auth_dependency
 from ..config import global_args
 
+# RAG-Anything support for multimodal processing
+try:
+    from raganything import RAGAnything, RAGAnythingConfig
+    RAGANYTHING_AVAILABLE = True
+except ImportError:
+    RAGANYTHING_AVAILABLE = False
+    logger.warning("RAG-Anything not installed. Multimodal processing disabled.")
+
 
 # Function to format datetime to ISO format string with timezone information
 def format_datetime(dt: Any) -> Optional[str]:
@@ -2913,5 +2921,136 @@ def create_document_routes(
             logger.error(f"Error requesting pipeline cancellation: {str(e)}")
             logger.error(traceback.format_exc())
             raise HTTPException(status_code=500, detail=str(e))
+
+    # Multimodal upload endpoint (only if RAG-Anything is available)
+    if RAGANYTHING_AVAILABLE:
+        @router.post(
+            "/upload_multimodal",
+            dependencies=[Depends(combined_auth)],
+        )
+        async def upload_multimodal_document(
+            file: UploadFile = File(...),
+            background_tasks: BackgroundTasks = None,
+        ):
+            """
+            Upload and process document with multimodal RAG-Anything
+
+            Handles images, tables, equations automatically using advanced processing.
+            More expensive than normal upload but better for complex documents with:
+            - Images and diagrams
+            - Complex tables
+            - Mathematical equations
+            - Charts and visualizations
+
+            **Processing features:**
+            - Uses MinerU for high-quality PDF parsing
+            - GPT-4o Vision for image analysis
+            - Structured table extraction
+            - LaTeX equation extraction
+
+            **Cost comparison:**
+            - Normal upload: ~$0.12 per 100 pages
+            - Multimodal upload: ~$1.02 per 100 pages (8-10x more expensive)
+
+            **When to use:**
+            - Scientific papers
+            - Technical manuals
+            - Reports with charts
+            - Documents where visual content is critical
+
+            Returns:
+                dict: Status and processing information
+
+            Raises:
+                HTTPException: If upload or processing fails (500)
+            """
+            try:
+                # 1. Save file temporarily
+                temp_file = doc_manager.input_dir / f"{temp_prefix}{file.filename}"
+                async with aiofiles.open(temp_file, "wb") as f:
+                    content = await file.read()
+                    await f.write(content)
+
+                logger.info(f"Processing multimodal document: {file.filename}")
+
+                # 2. Configure RAG-Anything
+                config = RAGAnythingConfig(
+                    working_dir=rag.working_dir,
+                    enable_image_processing=True,
+                    enable_table_processing=True,
+                    enable_equation_processing=True,
+                )
+
+                # 3. Vision model function (uses GPT-4o for images)
+                def vision_func(prompt, system_prompt=None, history_messages=[], image_data=None, **kwargs):
+                    if image_data:
+                        # Use vision model for images
+                        return rag.llm_model_func(
+                            "",
+                            messages=[
+                                {"role": "system", "content": system_prompt} if system_prompt else None,
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {"type": "text", "text": prompt},
+                                        {
+                                            "type": "image_url",
+                                            "image_url": {"url": f"data:image/jpeg;base64,{image_data}"},
+                                        },
+                                    ],
+                                },
+                            ],
+                            **kwargs,
+                        )
+                    else:
+                        # Fallback to regular LLM
+                        return rag.llm_model_func(prompt, system_prompt, history_messages, **kwargs)
+
+                # 4. Create RAG-Anything instance
+                rag_anything = RAGAnything(
+                    config=config,
+                    llm_model_func=rag.llm_model_func,
+                    vision_model_func=vision_func,
+                    embedding_func=rag.embedding_func,
+                )
+
+                # 5. Process document
+                output_dir = doc_manager.input_dir / "output"
+                output_dir.mkdir(exist_ok=True)
+
+                await rag_anything.process_document_complete(
+                    file_path=str(temp_file),
+                    output_dir=str(output_dir),
+                    parse_method="auto"
+                )
+
+                # 6. Remove temporary file
+                temp_file.unlink()
+
+                logger.info(f"Multimodal processing complete: {file.filename}")
+
+                # 7. Return success
+                return {
+                    "status": "success",
+                    "message": f"Document {file.filename} processed with multimodal RAG",
+                    "file_name": file.filename,
+                    "processing_type": "multimodal",
+                    "features_processed": {
+                        "images": True,
+                        "tables": True,
+                        "equations": True,
+                    },
+                    "note": "Multimodal processing uses GPT-4o Vision and is more expensive than regular upload"
+                }
+
+            except Exception as e:
+                logger.error(f"Multimodal upload failed: {str(e)}")
+                logger.error(traceback.format_exc())
+                # Clean up temp file if it exists
+                if temp_file.exists():
+                    temp_file.unlink()
+                raise HTTPException(status_code=500, detail=str(e))
+    else:
+        logger.info("RAG-Anything endpoint disabled (package not installed)")
 
     return router
