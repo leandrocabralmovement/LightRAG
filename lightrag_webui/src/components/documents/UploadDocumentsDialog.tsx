@@ -10,11 +10,12 @@ import {
   DialogTrigger
 } from '@/components/ui/Dialog'
 import FileUploader from '@/components/ui/FileUploader'
+import { Checkbox } from '@/components/ui/Checkbox'
 import { toast } from 'sonner'
 import { errorMessage } from '@/lib/utils'
 import { uploadDocument } from '@/api/lightrag'
 
-import { UploadIcon } from 'lucide-react'
+import { UploadIcon, Sparkles } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 interface UploadDocumentsDialogProps {
@@ -27,6 +28,7 @@ export default function UploadDocumentsDialog({ onDocumentsUploaded }: UploadDoc
   const [isUploading, setIsUploading] = useState(false)
   const [progresses, setProgresses] = useState<Record<string, number>>({})
   const [fileErrors, setFileErrors] = useState<Record<string, string>>({})
+  const [useMultimodal, setUseMultimodal] = useState(false)
 
   const handleRejectedFiles = useCallback(
     (rejectedFiles: FileRejection[]) => {
@@ -101,7 +103,7 @@ export default function UploadDocumentsDialog({ onDocumentsUploaded }: UploadDoc
                 ...pre,
                 [file.name]: percentCompleted
               }))
-            })
+            }, useMultimodal)
 
             if (result.status === 'duplicated') {
               uploadErrors[file.name] = t('documentPanel.uploadDocuments.fileUploader.duplicateFile')
@@ -204,6 +206,25 @@ export default function UploadDocumentsDialog({ onDocumentsUploaded }: UploadDoc
             {t('documentPanel.uploadDocuments.description')}
           </DialogDescription>
         </DialogHeader>
+
+        {/* Multimodal processing option */}
+        <div className="flex items-center space-x-2 py-2 px-1 rounded-md bg-muted/30">
+          <Checkbox
+            id="multimodal"
+            checked={useMultimodal}
+            onCheckedChange={(checked) => setUseMultimodal(checked as boolean)}
+            disabled={isUploading}
+          />
+          <label
+            htmlFor="multimodal"
+            className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 flex items-center gap-2 cursor-pointer"
+          >
+            <Sparkles className="h-4 w-4 text-amber-500" />
+            <span>Advanced Multimodal Processing</span>
+            <span className="text-xs text-muted-foreground">(Images, Tables, Equations)</span>
+          </label>
+        </div>
+
         <FileUploader
           maxFileCount={Infinity}
           maxSize={200 * 1024 * 1024}

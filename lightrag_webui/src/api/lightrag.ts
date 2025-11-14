@@ -587,12 +587,16 @@ export const insertTexts = async (texts: string[]): Promise<DocActionResponse> =
 
 export const uploadDocument = async (
   file: File,
-  onUploadProgress?: (percentCompleted: number) => void
+  onUploadProgress?: (percentCompleted: number) => void,
+  useMultimodal?: boolean
 ): Promise<DocActionResponse> => {
   const formData = new FormData()
   formData.append('file', file)
 
-  const response = await axiosInstance.post('/documents/upload', formData, {
+  // Use multimodal endpoint if requested, otherwise use standard upload
+  const endpoint = useMultimodal ? '/documents/upload_multimodal' : '/documents/upload'
+
+  const response = await axiosInstance.post(endpoint, formData, {
     headers: {
       'Content-Type': 'multipart/form-data'
     },
