@@ -97,8 +97,8 @@ RUN mkdir -p /app/data/rag_storage /app/data/inputs /app/data/tiktoken
 COPY --from=builder /app/data/tiktoken /app/data/tiktoken
 
 # Install RAG-Anything for multimodal document processing
-# Using pip from venv to install at runtime (not in uv.lock)
-RUN /app/.venv/bin/pip install --no-cache-dir 'raganything[all]'
+# Using uv pip to install in the venv (not in uv.lock)
+RUN uv pip install --no-cache 'raganything[all]'
 
 # Point to the prepared cache
 ENV TIKTOKEN_CACHE_DIR=/app/data/tiktoken
