@@ -3028,9 +3028,12 @@ def create_document_routes(
                 final_file = doc_manager.input_dir / file.filename
                 temp_file.rename(final_file)
 
+                # 7. Manually trigger document scan to register in doc_status
+                await doc_manager.scan_and_add_documents()
+
                 logger.info(f"Multimodal processing complete: {file.filename}")
 
-                # 7. Return success
+                # 8. Return success
                 return {
                     "status": "success",
                     "message": f"Document {file.filename} processed with multimodal RAG",
