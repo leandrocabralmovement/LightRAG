@@ -96,6 +96,10 @@ RUN mkdir -p /app/data/rag_storage /app/data/inputs /app/data/tiktoken
 # Copy offline cache into the newly created directory
 COPY --from=builder /app/data/tiktoken /app/data/tiktoken
 
+# Install RAG-Anything for multimodal document processing
+# Using pip from venv to install at runtime (not in uv.lock)
+RUN /app/.venv/bin/pip install --no-cache-dir 'raganything[all]'
+
 # Point to the prepared cache
 ENV TIKTOKEN_CACHE_DIR=/app/data/tiktoken
 ENV WORKING_DIR=/app/data/rag_storage
