@@ -2975,7 +2975,6 @@ def create_document_routes(
 
                 # 2. Configure RAG-Anything
                 config = RAGAnythingConfig(
-                    working_dir=rag.working_dir,
                     enable_image_processing=True,
                     enable_table_processing=True,
                     enable_equation_processing=True,
@@ -3006,12 +3005,11 @@ def create_document_routes(
                         # Fallback to regular LLM
                         return rag.llm_model_func(prompt, system_prompt, history_messages, **kwargs)
 
-                # 4. Create RAG-Anything instance
+                # 4. Create RAG-Anything instance using EXISTING LightRAG from server
+                # This ensures data is saved to the same storage (PostgreSQL + Neo4j)
                 rag_anything = RAGAnything(
-                    config=config,
-                    llm_model_func=rag.llm_model_func,
+                    lightrag=rag,  # Use server's LightRAG instance
                     vision_model_func=vision_func,
-                    embedding_func=rag.embedding_func,
                 )
 
                 # 5. Process document
