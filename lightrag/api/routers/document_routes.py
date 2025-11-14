@@ -3024,8 +3024,9 @@ def create_document_routes(
                     parse_method="auto"
                 )
 
-                # 6. Remove temporary file
-                temp_file.unlink()
+                # 6. Move file from temp to permanent location
+                final_file = doc_manager.input_dir / file.filename
+                temp_file.rename(final_file)
 
                 logger.info(f"Multimodal processing complete: {file.filename}")
 
