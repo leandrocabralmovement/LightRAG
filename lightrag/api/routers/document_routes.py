@@ -2973,14 +2973,7 @@ def create_document_routes(
 
                 logger.info(f"Processing multimodal document: {file.filename}")
 
-                # 2. Configure RAG-Anything
-                config = RAGAnythingConfig(
-                    enable_image_processing=True,
-                    enable_table_processing=True,
-                    enable_equation_processing=True,
-                )
-
-                # 3. Vision model function (uses GPT-4o for images)
+                # 2. Vision model function (uses GPT-4o for images)
                 def vision_func(prompt, system_prompt=None, history_messages=[], image_data=None, **kwargs):
                     if image_data:
                         # Use vision model for images
@@ -3005,14 +2998,15 @@ def create_document_routes(
                         # Fallback to regular LLM
                         return rag.llm_model_func(prompt, system_prompt, history_messages, **kwargs)
 
-                # 4. Create RAG-Anything instance using EXISTING LightRAG from server
-                # This ensures data is saved to the same storage (PostgreSQL + Neo4j)
+                # 3. Create RAG-Anything instance using EXISTING LightRAG from server
+                # IMPORTANT: Do NOT pass config= as it will create a new LightRAG instance
+                # Only pass lightrag= and vision_model_func= to reuse server's storage
                 rag_anything = RAGAnything(
-                    lightrag=rag,  # Use server's LightRAG instance
+                    lightrag=rag,  # Use server's LightRAG instance (with PostgreSQL + Neo4j)
                     vision_model_func=vision_func,
                 )
 
-                # 5. Process document
+                # 4. Process document
                 output_dir = doc_manager.input_dir / "output"
                 output_dir.mkdir(exist_ok=True)
 
@@ -3022,11 +3016,11 @@ def create_document_routes(
                     parse_method="auto"
                 )
 
-                # 6. Move file from temp to permanent location
+                # 5. Move file from temp to permanent location
                 final_file = doc_manager.input_dir / file.filename
                 temp_file.rename(final_file)
 
-                # 7. Manually register document in doc_status_storage
+                # 6. Manually register document in doc_status_storage
                 # Get document ID from RAG-Anything's internal LightRAG
                 doc_id = None
                 async for doc_id_key, doc_data in rag_anything.lightrag.doc_status_storage.get_all_keys():
@@ -3044,7 +3038,7 @@ def create_document_routes(
 
                 logger.info(f"Multimodal processing complete: {file.filename}")
 
-                # 8. Return success
+                # 7. Return success
                 return {
                     "status": "success",
                     "message": f"Document {file.filename} processed with multimodal RAG",
