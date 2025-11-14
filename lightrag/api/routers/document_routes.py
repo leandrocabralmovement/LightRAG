@@ -2999,11 +2999,11 @@ def create_document_routes(
                         return rag.llm_model_func(prompt, system_prompt, history_messages, **kwargs)
 
                 # 3. Create RAG-Anything instance using EXISTING LightRAG from server
-                # IMPORTANT: Do NOT pass config= as it will create a new LightRAG instance
-                # Only pass lightrag= and vision_model_func= to reuse server's storage
+                # Pass lightrag= first (positional) and config=None to prevent new instance creation
                 rag_anything = RAGAnything(
                     lightrag=rag,  # Use server's LightRAG instance (with PostgreSQL + Neo4j)
                     vision_model_func=vision_func,
+                    config=None,  # Explicitly None to prevent creating new LightRAG
                 )
 
                 # 4. Process document
