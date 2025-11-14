@@ -3028,8 +3028,21 @@ def create_document_routes(
                 final_file = doc_manager.input_dir / file.filename
                 temp_file.rename(final_file)
 
-                # 7. Manually trigger document scan to register in doc_status
-                await doc_manager.scan_and_add_documents()
+                # 7. Manually register document in doc_status_storage
+                # Get document ID from RAG-Anything's internal LightRAG
+                doc_id = None
+                async for doc_id_key, doc_data in rag_anything.lightrag.doc_status_storage.get_all_keys():
+                    if file.filename in str(doc_data.get("file_path", "")):
+                        doc_id = doc_id_key
+                        break
+
+                # If doc was processed, update its file_path to remove __tmp__ prefix
+                if doc_id:
+                    doc_status = await rag_anything.lightrag.doc_status_storage.get(doc_id)
+                    if doc_status:
+                        doc_status["file_path"] = file.filename
+                        await rag_anything.lightrag.doc_status_storage.upsert(doc_id, doc_status)
+                        logger.info(f"Updated doc_status for {file.filename}: {doc_id}")
 
                 logger.info(f"Multimodal processing complete: {file.filename}")
 
