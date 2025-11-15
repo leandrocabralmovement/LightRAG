@@ -110,7 +110,7 @@ services:
   # Conecta ao PostgreSQL e Neo4j
   # ============================================================================
   lightrag:
-    image: ghcr.io/hkuds/lightrag:latest
+    # image: ghcr.io/hkuds/lightrag:latest  # Commented to force local build
     container_name: lightrag
 
     build:
