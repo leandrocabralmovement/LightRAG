@@ -2989,8 +2989,7 @@ def create_document_routes(
                 content_list = await asyncio.to_thread(
                     parser.parse_document,
                     file_path=str(temp_file),
-                    output_dir=str(output_dir),
-                    parse_method="auto"
+                    output_dir=str(output_dir)
                 )
 
                 logger.info(f"MinerU parsed {len(content_list)} content blocks")
