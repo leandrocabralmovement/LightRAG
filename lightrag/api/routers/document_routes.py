@@ -27,9 +27,14 @@ from lightrag.utils import generate_track_id
 from lightrag.api.utils_api import get_combined_auth_dependency
 from ..config import global_args
 
-# RAG-Anything support for multimodal processing
+# RAG-Anything Modal Processors for multimodal processing
 try:
-    from raganything import RAGAnything, RAGAnythingConfig
+    from raganything.parser import MineruParser
+    from raganything.modalprocessors import (
+        ImageModalProcessor,
+        TableModalProcessor,
+        EquationModalProcessor,
+    )
     RAGANYTHING_AVAILABLE = True
 except ImportError:
     RAGANYTHING_AVAILABLE = False
@@ -2922,7 +2927,7 @@ def create_document_routes(
             logger.error(traceback.format_exc())
             raise HTTPException(status_code=500, detail=str(e))
 
-    # Multimodal upload endpoint (only if RAG-Anything is available)
+    # Multimodal upload endpoint using Modal Processors directly
     if RAGANYTHING_AVAILABLE:
         @router.post(
             "/upload_multimodal",
@@ -2933,50 +2938,92 @@ def create_document_routes(
             background_tasks: BackgroundTasks = None,
         ):
             """
-            Upload and process document with multimodal RAG-Anything
+            Upload and process document with multimodal processing using Modal Processors
 
-            Handles images, tables, equations automatically using advanced processing.
-            More expensive than normal upload but better for complex documents with:
-            - Images and diagrams
-            - Complex tables
-            - Mathematical equations
-            - Charts and visualizations
+            Uses MinerU parser + specialized modal processors to handle:
+            - Images and diagrams (GPT-4o Vision analysis)
+            - Complex tables (structured extraction)
+            - Mathematical equations (LaTeX extraction)
 
-            **Processing features:**
-            - Uses MinerU for high-quality PDF parsing
-            - GPT-4o Vision for image analysis
-            - Structured table extraction
-            - LaTeX equation extraction
+            **Processing Pipeline:**
+            1. MinerU parses document → extracts text, images, tables, equations
+            2. Text content → inserted directly into LightRAG
+            3. Images → analyzed with Vision model → descriptions inserted
+            4. Tables → structured processing → descriptions inserted
+            5. Equations → LaTeX extraction → descriptions inserted
+            6. All data saved to server's PostgreSQL + Neo4j storage
 
             **Cost comparison:**
             - Normal upload: ~$0.12 per 100 pages
-            - Multimodal upload: ~$1.02 per 100 pages (8-10x more expensive)
+            - Multimodal upload: ~$1.02 per 100 pages (8-10x more)
 
             **When to use:**
-            - Scientific papers
-            - Technical manuals
-            - Reports with charts
+            - Scientific papers with diagrams
+            - Technical manuals with charts
+            - Reports with complex tables
             - Documents where visual content is critical
 
             Returns:
-                dict: Status and processing information
+                dict: Processing status and statistics
 
             Raises:
                 HTTPException: If upload or processing fails (500)
             """
+            temp_file = None
             try:
                 # 1. Save file temporarily
-                temp_file = doc_manager.input_dir / f"{temp_prefix}{file.filename}"
+                sanitized_name = sanitize_filename(file.filename, doc_manager.input_dir)
+                temp_file = doc_manager.input_dir / f"{temp_prefix}{sanitized_name}"
+
                 async with aiofiles.open(temp_file, "wb") as f:
                     content = await file.read()
                     await f.write(content)
 
-                logger.info(f"Processing multimodal document: {file.filename}")
+                logger.info(f"Starting multimodal processing: {file.filename}")
 
-                # 2. Vision model function (uses GPT-4o for images)
+                # 2. Parse document with MinerU
+                parser = MineruParser()
+                output_dir = doc_manager.input_dir / "output"
+                output_dir.mkdir(exist_ok=True)
+
+                content_list = await asyncio.to_thread(
+                    parser.parse_document,
+                    file_path=str(temp_file),
+                    output_dir=str(output_dir),
+                    parse_method="auto"
+                )
+
+                logger.info(f"MinerU parsed {len(content_list)} content blocks")
+
+                # 3. Separate content by type
+                text_blocks = []
+                image_blocks = []
+                table_blocks = []
+                equation_blocks = []
+
+                for block in content_list:
+                    content_type = block.get("type", "")
+                    if content_type == "text":
+                        text_blocks.append(block.get("content", ""))
+                    elif content_type == "image":
+                        image_blocks.append(block)
+                    elif content_type == "table":
+                        table_blocks.append(block)
+                    elif content_type == "equation":
+                        equation_blocks.append(block)
+
+                logger.info(f"Content breakdown: {len(text_blocks)} text, {len(image_blocks)} images, {len(table_blocks)} tables, {len(equation_blocks)} equations")
+
+                # 4. Process text content first
+                if text_blocks:
+                    full_text = "\n\n".join(text_blocks)
+                    if full_text.strip():
+                        await rag.ainsert(full_text)
+                        logger.info(f"Inserted {len(text_blocks)} text blocks into LightRAG")
+
+                # 5. Vision model function for images
                 def vision_func(prompt, system_prompt=None, history_messages=[], image_data=None, **kwargs):
                     if image_data:
-                        # Use vision model for images
                         return rag.llm_model_func(
                             "",
                             messages=[
@@ -2995,68 +3042,100 @@ def create_document_routes(
                             **kwargs,
                         )
                     else:
-                        # Fallback to regular LLM
                         return rag.llm_model_func(prompt, system_prompt, history_messages, **kwargs)
 
-                # 3. Create RAG-Anything instance using EXISTING LightRAG from server
-                # Pass lightrag= first (positional) and config=None to prevent new instance creation
-                rag_anything = RAGAnything(
-                    lightrag=rag,  # Use server's LightRAG instance (with PostgreSQL + Neo4j)
-                    vision_model_func=vision_func,
-                    config=None,  # Explicitly None to prevent creating new LightRAG
-                )
+                # 6. Process images with Vision model
+                processed_images = 0
+                if image_blocks:
+                    image_processor = ImageModalProcessor(
+                        lightrag=rag,
+                        modal_caption_func=vision_func
+                    )
 
-                # 4. Process document
-                output_dir = doc_manager.input_dir / "output"
-                output_dir.mkdir(exist_ok=True)
+                    for img_block in image_blocks:
+                        try:
+                            description, _ = await image_processor.process_multimodal_content(
+                                modal_content=img_block,
+                                file_path=file.filename
+                            )
+                            if description and description.strip():
+                                await rag.ainsert(description)
+                                processed_images += 1
+                                logger.info(f"Processed image {processed_images}/{len(image_blocks)}")
+                        except Exception as e:
+                            logger.warning(f"Failed to process image: {str(e)}")
 
-                await rag_anything.process_document_complete(
-                    file_path=str(temp_file),
-                    output_dir=str(output_dir),
-                    parse_method="auto"
-                )
+                # 7. Process tables
+                processed_tables = 0
+                if table_blocks:
+                    table_processor = TableModalProcessor(
+                        lightrag=rag,
+                        modal_caption_func=rag.llm_model_func
+                    )
 
-                # 5. Move file from temp to permanent location
-                final_file = doc_manager.input_dir / file.filename
-                temp_file.rename(final_file)
+                    for table_block in table_blocks:
+                        try:
+                            description, _ = await table_processor.process_multimodal_content(
+                                modal_content=table_block,
+                                file_path=file.filename
+                            )
+                            if description and description.strip():
+                                await rag.ainsert(description)
+                                processed_tables += 1
+                                logger.info(f"Processed table {processed_tables}/{len(table_blocks)}")
+                        except Exception as e:
+                            logger.warning(f"Failed to process table: {str(e)}")
 
-                # 6. Manually register document in doc_status_storage
-                # Get document ID from RAG-Anything's internal LightRAG
-                doc_id = None
-                async for doc_id_key, doc_data in rag_anything.lightrag.doc_status_storage.get_all_keys():
-                    if file.filename in str(doc_data.get("file_path", "")):
-                        doc_id = doc_id_key
-                        break
+                # 8. Process equations
+                processed_equations = 0
+                if equation_blocks:
+                    equation_processor = EquationModalProcessor(
+                        lightrag=rag,
+                        modal_caption_func=rag.llm_model_func
+                    )
 
-                # If doc was processed, update its file_path to remove __tmp__ prefix
-                if doc_id:
-                    doc_status = await rag_anything.lightrag.doc_status_storage.get(doc_id)
-                    if doc_status:
-                        doc_status["file_path"] = file.filename
-                        await rag_anything.lightrag.doc_status_storage.upsert(doc_id, doc_status)
-                        logger.info(f"Updated doc_status for {file.filename}: {doc_id}")
+                    for eq_block in equation_blocks:
+                        try:
+                            description, _ = await equation_processor.process_multimodal_content(
+                                modal_content=eq_block,
+                                file_path=file.filename
+                            )
+                            if description and description.strip():
+                                await rag.ainsert(description)
+                                processed_equations += 1
+                                logger.info(f"Processed equation {processed_equations}/{len(equation_blocks)}")
+                        except Exception as e:
+                            logger.warning(f"Failed to process equation: {str(e)}")
+
+                # 9. Move file to permanent location
+                final_file = doc_manager.input_dir / sanitized_name
+                if temp_file.exists():
+                    temp_file.rename(final_file)
 
                 logger.info(f"Multimodal processing complete: {file.filename}")
+                logger.info(f"Processed: {processed_images} images, {processed_tables} tables, {processed_equations} equations")
 
-                # 7. Return success
+                # 10. Return success with statistics
                 return {
                     "status": "success",
-                    "message": f"Document {file.filename} processed with multimodal RAG",
+                    "message": f"Document {file.filename} processed with multimodal pipeline",
                     "file_name": file.filename,
-                    "processing_type": "multimodal",
-                    "features_processed": {
-                        "images": True,
-                        "tables": True,
-                        "equations": True,
+                    "processing_type": "multimodal_direct",
+                    "statistics": {
+                        "total_blocks": len(content_list),
+                        "text_blocks": len(text_blocks),
+                        "images_processed": processed_images,
+                        "tables_processed": processed_tables,
+                        "equations_processed": processed_equations,
                     },
-                    "note": "Multimodal processing uses GPT-4o Vision and is more expensive than regular upload"
+                    "note": "Data saved to server's PostgreSQL + Neo4j storage"
                 }
 
             except Exception as e:
                 logger.error(f"Multimodal upload failed: {str(e)}")
                 logger.error(traceback.format_exc())
                 # Clean up temp file if it exists
-                if temp_file.exists():
+                if temp_file and temp_file.exists():
                     temp_file.unlink()
                 raise HTTPException(status_code=500, detail=str(e))
     else:
