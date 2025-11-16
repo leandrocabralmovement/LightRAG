@@ -3137,9 +3137,9 @@ def create_document_routes(
                     if temp_file.exists():
                         temp_file.rename(final_file)
 
-                    # Insert with correct filename
-                    await rag.ainsert(full_document)
-                    logger.info(f"Inserted complete document with {len(all_content)} content blocks")
+                    # Insert with correct filename parameter
+                    await rag.ainsert(full_document, file_paths=file.filename)
+                    logger.info(f"Inserted complete document '{file.filename}' with {len(all_content)} content blocks")
                 else:
                     # If no content, still move file
                     final_file = doc_manager.input_dir / sanitized_name
