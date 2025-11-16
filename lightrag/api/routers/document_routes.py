@@ -40,6 +40,9 @@ except ImportError:
     RAGANYTHING_AVAILABLE = False
     logger.warning("RAG-Anything not installed. Multimodal processing disabled.")
 
+# Global semaphore for multimodal upload queue (max 2 concurrent)
+multimodal_upload_semaphore = asyncio.Semaphore(2)
+
 
 # Function to format datetime to ISO format string with timezone information
 def format_datetime(dt: Any) -> Optional[str]:
@@ -2927,63 +2930,23 @@ def create_document_routes(
             logger.error(traceback.format_exc())
             raise HTTPException(status_code=500, detail=str(e))
 
-    # Multimodal upload endpoint using Modal Processors directly
-    if RAGANYTHING_AVAILABLE:
-        @router.post(
-            "/upload_multimodal",
-            dependencies=[Depends(combined_auth)],
-        )
-        async def upload_multimodal_document(
-            file: UploadFile = File(...),
-            background_tasks: BackgroundTasks = None,
-        ):
-            """
-            Upload and process document with multimodal processing using Modal Processors
+    # Background processing function for multimodal uploads
+    async def process_multimodal_document_background(
+        temp_file_path: Path,
+        filename: str,
+        sanitized_name: str,
+        rag_instance,
+        doc_manager_instance
+    ):
+        """Process multimodal document in background with semaphore control"""
+        async with multimodal_upload_semaphore:
+            logger.info(f"[Queue] Processing {filename} (semaphore acquired, max 2 concurrent)")
+            temp_file = Path(temp_file_path)
 
-            Uses MinerU parser + specialized modal processors to handle:
-            - Images and diagrams (GPT-4o Vision analysis)
-            - Complex tables (structured extraction)
-            - Mathematical equations (LaTeX extraction)
-
-            **Processing Pipeline:**
-            1. MinerU parses document → extracts text, images, tables, equations
-            2. Text content → inserted directly into LightRAG
-            3. Images → analyzed with Vision model → descriptions inserted
-            4. Tables → structured processing → descriptions inserted
-            5. Equations → LaTeX extraction → descriptions inserted
-            6. All data saved to server's PostgreSQL + Neo4j storage
-
-            **Cost comparison:**
-            - Normal upload: ~$0.12 per 100 pages
-            - Multimodal upload: ~$1.02 per 100 pages (8-10x more)
-
-            **When to use:**
-            - Scientific papers with diagrams
-            - Technical manuals with charts
-            - Reports with complex tables
-            - Documents where visual content is critical
-
-            Returns:
-                dict: Processing status and statistics
-
-            Raises:
-                HTTPException: If upload or processing fails (500)
-            """
-            temp_file = None
             try:
-                # 1. Save file temporarily
-                sanitized_name = sanitize_filename(file.filename, doc_manager.input_dir)
-                temp_file = doc_manager.input_dir / f"{temp_prefix}{sanitized_name}"
-
-                async with aiofiles.open(temp_file, "wb") as f:
-                    content = await file.read()
-                    await f.write(content)
-
-                logger.info(f"Starting multimodal processing: {file.filename}")
-
-                # 2. Parse document with MinerU
+                # Parse document with MinerU
                 parser = MineruParser()
-                output_dir = doc_manager.input_dir / "output"
+                output_dir = doc_manager_instance.input_dir / "output"
                 output_dir.mkdir(exist_ok=True)
 
                 content_list = await asyncio.to_thread(
@@ -2992,9 +2955,9 @@ def create_document_routes(
                     output_dir=str(output_dir)
                 )
 
-                logger.info(f"MinerU parsed {len(content_list)} content blocks")
+                logger.info(f"[{filename}] MinerU parsed {len(content_list)} content blocks")
 
-                # 3. Separate content by type
+                # Separate content by type
                 text_blocks = []
                 image_blocks = []
                 table_blocks = []
@@ -3011,100 +2974,49 @@ def create_document_routes(
                     elif content_type == "equation":
                         equation_blocks.append(block)
 
-                logger.info(f"Content breakdown: {len(text_blocks)} text, {len(image_blocks)} images, {len(table_blocks)} tables, {len(equation_blocks)} equations")
+                logger.info(f"[{filename}] Content: {len(text_blocks)} text, {len(image_blocks)} images, {len(table_blocks)} tables, {len(equation_blocks)} equations")
 
-                # 4. Collect text content (will insert everything together at the end)
+                # Collect text content
                 all_content = []
                 if text_blocks:
                     all_content.extend(text_blocks)
-                    logger.info(f"Collected {len(text_blocks)} text blocks")
 
-                # 5. Vision model function for images
-                def vision_func(prompt, system_prompt=None, history_messages=[], image_data=None, **kwargs):
-                    if image_data:
-                        return rag.llm_model_func(
-                            "",
-                            messages=[
-                                {"role": "system", "content": system_prompt} if system_prompt else None,
-                                {
-                                    "role": "user",
-                                    "content": [
-                                        {"type": "text", "text": prompt},
-                                        {
-                                            "type": "image_url",
-                                            "image_url": {"url": f"data:image/jpeg;base64,{image_data}"},
-                                        },
-                                    ],
-                                },
-                            ],
-                            **kwargs,
-                        )
-                    else:
-                        return rag.llm_model_func(prompt, system_prompt, history_messages, **kwargs)
-
-                # 6. Process images with Vision model (DISABLED to save costs)
-                # Uncomment below to enable image processing with GPT-4o Vision
-                processed_images = 0
-                # if image_blocks:
-                #     image_processor = ImageModalProcessor(
-                #         lightrag=rag,
-                #         modal_caption_func=vision_func
-                #     )
-                #
-                #     for img_block in image_blocks:
-                #         try:
-                #             description, *_ = await image_processor.process_multimodal_content(
-                #                 modal_content=img_block,
-                #                 content_type="image",
-                #                 file_path=file.filename
-                #             )
-                #             if description and description.strip():
-                #                 await rag.ainsert(description)
-                #                 processed_images += 1
-                #                 logger.info(f"Processed image {processed_images}/{len(image_blocks)}")
-                #         except Exception as e:
-                #             logger.warning(f"Failed to process image: {str(e)}")
-                logger.info(f"Image processing disabled (skipped {len(image_blocks)} images)")
-
-                # 7. Process tables IN PARALLEL (much faster!)
+                # Process tables in parallel
                 processed_tables = 0
                 if table_blocks:
                     table_processor = TableModalProcessor(
-                        lightrag=rag,
-                        modal_caption_func=rag.llm_model_func
+                        lightrag=rag_instance,
+                        modal_caption_func=rag_instance.llm_model_func
                     )
 
-                    # Process all tables in parallel
                     async def process_single_table(table_block, index):
                         try:
                             description, *_ = await table_processor.process_multimodal_content(
                                 modal_content=table_block,
                                 content_type="table",
-                                file_path=file.filename
+                                file_path=filename
                             )
                             if description and description.strip():
-                                logger.info(f"Processed table {index+1}/{len(table_blocks)}")
+                                logger.info(f"[{filename}] Processed table {index+1}/{len(table_blocks)}")
                                 return description
                         except Exception as e:
-                            logger.warning(f"Failed to process table {index+1}: {str(e)}")
+                            logger.warning(f"[{filename}] Failed to process table {index+1}: {str(e)}")
                             return None
 
-                    # Process all tables concurrently
                     table_tasks = [process_single_table(tb, i) for i, tb in enumerate(table_blocks)]
                     table_descriptions = await asyncio.gather(*table_tasks)
 
-                    # Filter out None results and add to content
                     valid_tables = [desc for desc in table_descriptions if desc]
                     all_content.extend(valid_tables)
                     processed_tables = len(valid_tables)
-                    logger.info(f"Processed {processed_tables}/{len(table_blocks)} tables successfully")
+                    logger.info(f"[{filename}] Processed {processed_tables}/{len(table_blocks)} tables")
 
-                # 8. Process equations IN PARALLEL
+                # Process equations in parallel
                 processed_equations = 0
                 if equation_blocks:
                     equation_processor = EquationModalProcessor(
-                        lightrag=rag,
-                        modal_caption_func=rag.llm_model_func
+                        lightrag=rag_instance,
+                        modal_caption_func=rag_instance.llm_model_func
                     )
 
                     async def process_single_equation(eq_block, index):
@@ -3112,13 +3024,13 @@ def create_document_routes(
                             description, *_ = await equation_processor.process_multimodal_content(
                                 modal_content=eq_block,
                                 content_type="equation",
-                                file_path=file.filename
+                                file_path=filename
                             )
                             if description and description.strip():
-                                logger.info(f"Processed equation {index+1}/{len(equation_blocks)}")
+                                logger.info(f"[{filename}] Processed equation {index+1}/{len(equation_blocks)}")
                                 return description
                         except Exception as e:
-                            logger.warning(f"Failed to process equation {index+1}: {str(e)}")
+                            logger.warning(f"[{filename}] Failed to process equation {index+1}: {str(e)}")
                             return None
 
                     equation_tasks = [process_single_equation(eq, i) for i, eq in enumerate(equation_blocks)]
@@ -3127,51 +3039,122 @@ def create_document_routes(
                     valid_equations = [desc for desc in equation_descriptions if desc]
                     all_content.extend(valid_equations)
                     processed_equations = len(valid_equations)
-                    logger.info(f"Processed {processed_equations}/{len(equation_blocks)} equations successfully")
+                    logger.info(f"[{filename}] Processed {processed_equations}/{len(equation_blocks)} equations")
 
-                # 9. Insert ALL content as a single document (text + tables + equations)
+                # Insert all content as single document
                 if all_content:
                     full_document = "\n\n---\n\n".join(all_content)
-                    # Move file to permanent location BEFORE insert (so filename is correct)
-                    final_file = doc_manager.input_dir / sanitized_name
+                    # Move file to permanent location
+                    final_file = doc_manager_instance.input_dir / sanitized_name
                     if temp_file.exists():
                         temp_file.rename(final_file)
 
-                    # Insert with correct filename parameter
-                    await rag.ainsert(full_document, file_paths=file.filename)
-                    logger.info(f"Inserted complete document '{file.filename}' with {len(all_content)} content blocks")
+                    # Insert with correct filename
+                    await rag_instance.ainsert(full_document, file_paths=filename)
+                    logger.info(f"[{filename}] ✅ Complete! {len(all_content)} blocks, {processed_tables} tables, {processed_equations} equations")
                 else:
-                    # If no content, still move file
-                    final_file = doc_manager.input_dir / sanitized_name
+                    # No content, still move file
+                    final_file = doc_manager_instance.input_dir / sanitized_name
                     if temp_file.exists():
                         temp_file.rename(final_file)
+                    logger.warning(f"[{filename}] No content extracted")
 
-                logger.info(f"Multimodal processing complete: {file.filename}")
-                logger.info(f"Processed: {processed_images} images, {processed_tables} tables, {processed_equations} equations")
+            except Exception as e:
+                logger.error(f"[{filename}] ❌ Processing failed: {str(e)}")
+                logger.error(traceback.format_exc())
+                # Clean up temp file on error
+                if temp_file.exists():
+                    temp_file.unlink()
+            finally:
+                logger.info(f"[Queue] Finished {filename} (semaphore released)")
 
-                # 10. Return success with statistics
+    # Multimodal upload endpoint using Modal Processors directly
+    if RAGANYTHING_AVAILABLE:
+        @router.post(
+            "/upload_multimodal",
+            dependencies=[Depends(combined_auth)],
+        )
+        async def upload_multimodal_document(
+            file: UploadFile = File(...),
+            background_tasks: BackgroundTasks = None,
+        ):
+            """
+            Upload and process document with multimodal processing (queued, non-blocking)
+
+            **Queue System:**
+            - Maximum 2 documents processing concurrently
+            - Additional uploads are queued automatically
+            - Returns immediately (processing happens in background)
+            - Check status via /documents/pipeline_status
+
+            **Processing Pipeline:**
+            1. MinerU parses document → extracts text, images, tables, equations
+            2. Text content → inserted into LightRAG
+            3. Tables → processed in PARALLEL → inserted
+            4. Equations → processed in PARALLEL → inserted
+            5. Images → DISABLED (to save costs)
+            6. All data saved to PostgreSQL + Neo4j
+
+            **Concurrency:**
+            - Max 2 documents processing at once (controlled by semaphore)
+            - Safe to upload 10, 20, 50 documents - they will queue
+            - No server overload
+
+            **Cost:** ~$0.15-0.30 per document (tables only, no images)
+
+            Returns:
+                dict: Immediate response with queue status
+
+            Raises:
+                HTTPException: If file save fails (500)
+            """
+            try:
+                # 1. Save file temporarily
+                sanitized_name = sanitize_filename(file.filename, doc_manager.input_dir)
+                temp_file = doc_manager.input_dir / f"{temp_prefix}{sanitized_name}"
+
+                async with aiofiles.open(temp_file, "wb") as f:
+                    content = await file.read()
+                    await f.write(content)
+
+                logger.info(f"[Queue] Received {file.filename}, adding to processing queue")
+
+                # 2. Add to background queue (returns immediately!)
+                if background_tasks:
+                    background_tasks.add_task(
+                        process_multimodal_document_background,
+                        temp_file,
+                        file.filename,
+                        sanitized_name,
+                        rag,
+                        doc_manager
+                    )
+                    queue_status = "queued_background"
+                    logger.info(f"[Queue] {file.filename} queued for background processing")
+                else:
+                    # Fallback: process synchronously if no background_tasks
+                    await process_multimodal_document_background(
+                        temp_file,
+                        file.filename,
+                        sanitized_name,
+                        rag,
+                        doc_manager
+                    )
+                    queue_status = "processed_sync"
+
+                # 3. Return immediately with queue status
                 return {
-                    "status": "success",
-                    "message": f"Document {file.filename} processed with multimodal pipeline",
+                    "status": "queued",
+                    "message": f"Document {file.filename} queued for multimodal processing",
                     "file_name": file.filename,
-                    "processing_type": "multimodal_direct",
-                    "statistics": {
-                        "total_blocks": len(content_list),
-                        "text_blocks": len(text_blocks),
-                        "images_processed": processed_images,
-                        "tables_processed": processed_tables,
-                        "equations_processed": processed_equations,
-                    },
-                    "note": "Data saved to server's PostgreSQL + Neo4j storage"
+                    "queue_status": queue_status,
+                    "note": "Processing in background. Max 2 concurrent. Check /documents/pipeline_status for progress"
                 }
 
             except Exception as e:
-                logger.error(f"Multimodal upload failed: {str(e)}")
+                logger.error(f"[Queue] Failed to queue {file.filename}: {str(e)}")
                 logger.error(traceback.format_exc())
-                # Clean up temp file if it exists
-                if temp_file and temp_file.exists():
-                    temp_file.unlink()
-                raise HTTPException(status_code=500, detail=str(e))
+                raise HTTPException(status_code=500, detail=f"Failed to queue document: {str(e)}")
     else:
         logger.info("RAG-Anything endpoint disabled (package not installed)")
 
