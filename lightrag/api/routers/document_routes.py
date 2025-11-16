@@ -3013,12 +3013,11 @@ def create_document_routes(
 
                 logger.info(f"Content breakdown: {len(text_blocks)} text, {len(image_blocks)} images, {len(table_blocks)} tables, {len(equation_blocks)} equations")
 
-                # 4. Process text content first
+                # 4. Collect text content (will insert everything together at the end)
+                all_content = []
                 if text_blocks:
-                    full_text = "\n\n".join(text_blocks)
-                    if full_text.strip():
-                        await rag.ainsert(full_text)
-                        logger.info(f"Inserted {len(text_blocks)} text blocks into LightRAG")
+                    all_content.extend(text_blocks)
+                    logger.info(f"Collected {len(text_blocks)} text blocks")
 
                 # 5. Vision model function for images
                 def vision_func(prompt, system_prompt=None, history_messages=[], image_data=None, **kwargs):
@@ -3067,7 +3066,7 @@ def create_document_routes(
                 #             logger.warning(f"Failed to process image: {str(e)}")
                 logger.info(f"Image processing disabled (skipped {len(image_blocks)} images)")
 
-                # 7. Process tables
+                # 7. Process tables IN PARALLEL (much faster!)
                 processed_tables = 0
                 if table_blocks:
                     table_processor = TableModalProcessor(
@@ -3075,7 +3074,8 @@ def create_document_routes(
                         modal_caption_func=rag.llm_model_func
                     )
 
-                    for table_block in table_blocks:
+                    # Process all tables in parallel
+                    async def process_single_table(table_block, index):
                         try:
                             description, *_ = await table_processor.process_multimodal_content(
                                 modal_content=table_block,
@@ -3083,13 +3083,23 @@ def create_document_routes(
                                 file_path=file.filename
                             )
                             if description and description.strip():
-                                await rag.ainsert(description)
-                                processed_tables += 1
-                                logger.info(f"Processed table {processed_tables}/{len(table_blocks)}")
+                                logger.info(f"Processed table {index+1}/{len(table_blocks)}")
+                                return description
                         except Exception as e:
-                            logger.warning(f"Failed to process table: {str(e)}")
+                            logger.warning(f"Failed to process table {index+1}: {str(e)}")
+                            return None
 
-                # 8. Process equations
+                    # Process all tables concurrently
+                    table_tasks = [process_single_table(tb, i) for i, tb in enumerate(table_blocks)]
+                    table_descriptions = await asyncio.gather(*table_tasks)
+
+                    # Filter out None results and add to content
+                    valid_tables = [desc for desc in table_descriptions if desc]
+                    all_content.extend(valid_tables)
+                    processed_tables = len(valid_tables)
+                    logger.info(f"Processed {processed_tables}/{len(table_blocks)} tables successfully")
+
+                # 8. Process equations IN PARALLEL
                 processed_equations = 0
                 if equation_blocks:
                     equation_processor = EquationModalProcessor(
@@ -3097,7 +3107,7 @@ def create_document_routes(
                         modal_caption_func=rag.llm_model_func
                     )
 
-                    for eq_block in equation_blocks:
+                    async def process_single_equation(eq_block, index):
                         try:
                             description, *_ = await equation_processor.process_multimodal_content(
                                 modal_content=eq_block,
@@ -3105,16 +3115,36 @@ def create_document_routes(
                                 file_path=file.filename
                             )
                             if description and description.strip():
-                                await rag.ainsert(description)
-                                processed_equations += 1
-                                logger.info(f"Processed equation {processed_equations}/{len(equation_blocks)}")
+                                logger.info(f"Processed equation {index+1}/{len(equation_blocks)}")
+                                return description
                         except Exception as e:
-                            logger.warning(f"Failed to process equation: {str(e)}")
+                            logger.warning(f"Failed to process equation {index+1}: {str(e)}")
+                            return None
 
-                # 9. Move file to permanent location
-                final_file = doc_manager.input_dir / sanitized_name
-                if temp_file.exists():
-                    temp_file.rename(final_file)
+                    equation_tasks = [process_single_equation(eq, i) for i, eq in enumerate(equation_blocks)]
+                    equation_descriptions = await asyncio.gather(*equation_tasks)
+
+                    valid_equations = [desc for desc in equation_descriptions if desc]
+                    all_content.extend(valid_equations)
+                    processed_equations = len(valid_equations)
+                    logger.info(f"Processed {processed_equations}/{len(equation_blocks)} equations successfully")
+
+                # 9. Insert ALL content as a single document (text + tables + equations)
+                if all_content:
+                    full_document = "\n\n---\n\n".join(all_content)
+                    # Move file to permanent location BEFORE insert (so filename is correct)
+                    final_file = doc_manager.input_dir / sanitized_name
+                    if temp_file.exists():
+                        temp_file.rename(final_file)
+
+                    # Insert with correct filename
+                    await rag.ainsert(full_document)
+                    logger.info(f"Inserted complete document with {len(all_content)} content blocks")
+                else:
+                    # If no content, still move file
+                    final_file = doc_manager.input_dir / sanitized_name
+                    if temp_file.exists():
+                        temp_file.rename(final_file)
 
                 logger.info(f"Multimodal processing complete: {file.filename}")
                 logger.info(f"Processed: {processed_images} images, {processed_tables} tables, {processed_equations} equations")
