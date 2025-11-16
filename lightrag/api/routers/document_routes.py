@@ -2976,6 +2976,15 @@ def create_document_routes(
 
                 logger.info(f"[{filename}] Content: {len(text_blocks)} text, {len(image_blocks)} images, {len(table_blocks)} tables, {len(equation_blocks)} equations")
 
+                # DEBUG: Check text_blocks content
+                if text_blocks:
+                    total_text_length = sum(len(t) for t in text_blocks)
+                    logger.info(f"[{filename}] DEBUG: text_blocks has {len(text_blocks)} blocks, total {total_text_length} characters")
+                    if total_text_length == 0:
+                        logger.warning(f"[{filename}] DEBUG: text_blocks exist but are EMPTY!")
+                else:
+                    logger.warning(f"[{filename}] DEBUG: text_blocks is EMPTY list!")
+
                 # We will insert text and multimodal content SEPARATELY
                 # This prevents text from being lost when combined with large tables
 
