@@ -331,6 +331,158 @@ Six query modes available via `QueryParam(mode="...")`:
 - PascalCase for components
 - Tailwind utility-first CSS
 
+## Multimodal Document Processing (RAG-Anything)
+
+### Overview
+
+The system supports advanced multimodal document processing using RAG-Anything's Modal Processors:
+- **MinerU Parser** - High-quality PDF parsing with layout preservation
+- **TableModalProcessor** - Structured table extraction and analysis
+- **ImageModalProcessor** - GPT-4o Vision analysis (disabled by default for cost savings)
+- **EquationModalProcessor** - LaTeX equation extraction
+
+### Multimodal Upload Endpoint
+
+**`/documents/upload_multimodal`** - Queued multimodal processing
+
+**Features:**
+- Queue system with semaphore (max 2 concurrent uploads)
+- Parallel table processing (all tables processed simultaneously)
+- Automatic text chunking (1200 tokens with 100 overlap)
+- Returns immediately (processing in background)
+- Supports bulk uploads (10, 50, 100 documents)
+
+**Processing Pipeline:**
+1. MinerU parses document → extracts text, images, tables, equations
+2. Text content → inserted with proper chunking
+3. Tables → processed in PARALLEL → each becomes 1 chunk
+4. Equations → processed in PARALLEL → each becomes 1 chunk
+5. Images → DISABLED by default (uncomment to enable)
+6. All data saved to PostgreSQL + Neo4j with correct filename
+
+**Usage:**
+```bash
+# Via API
+curl -X POST "http://your-server:9621/documents/upload_multimodal" \
+  -F "file=@document.pdf"
+
+# Response (immediate)
+{
+  "status": "queued",
+  "file_name": "document.pdf",
+  "queue_status": "queued_background",
+  "note": "Processing in background. Max 2 concurrent."
+}
+```
+
+**Key Implementation Details:**
+- Text blocks use `block.get("text")` not `block.get("content")` (MinerU format)
+- Text and tables inserted SEPARATELY (prevents text loss)
+- Each table description inserted individually (maintains granularity)
+- File moved to permanent location BEFORE insert (ensures correct filename)
+
+**Cost Considerations:**
+- Images disabled by default (~90% cost savings)
+- ~$0.15-0.30 per document (tables only)
+- ~$1-2 per document if images enabled (GPT-4o Vision)
+
+### Queue System
+
+**Configuration:**
+```python
+# lightrag/api/routers/document_routes.py
+multimodal_upload_semaphore = asyncio.Semaphore(2)  # Max 2 concurrent
+```
+
+**Behavior:**
+- Upload 10 documents → all accepted immediately
+- Server processes 2 at a time
+- When 1 finishes, next in queue starts automatically
+- No server overload or OOM issues
+
+**Monitoring:**
+```bash
+# Check logs
+docker logs lightrag -f | grep "\[Queue\]"
+
+# Expected output
+[Queue] Received file1.pdf
+[Queue] Processing file1.pdf (semaphore 1/2)
+[Queue] Processing file2.pdf (semaphore 2/2)
+[Queue] Finished file1.pdf (semaphore released)
+[Queue] Processing file3.pdf (semaphore 1/2)
+```
+
+### Resource Requirements
+
+**Minimum for Multimodal:**
+- 8 CPUs (for parallel table processing)
+- 14GB RAM (MinerU needs 4-6GB per document)
+- Storage: ~100-500MB per document (includes parsed images/tables)
+
+**Docker Configuration:**
+```yaml
+# docker-compose.full.yml
+deploy:
+  resources:
+    limits:
+      cpus: '8'
+      memory: 14G
+```
+
+### N8N Integration
+
+See `N8N_WORKFLOW_LIGHTRAG.md` for complete workflow examples.
+
+**Basic HTTP Request Node:**
+```json
+{
+  "url": "http://your-server:9621/documents/upload_multimodal",
+  "method": "POST",
+  "sendBody": true,
+  "contentType": "multipart-form-data",
+  "bodyParameters": {
+    "parameters": [{
+      "name": "file",
+      "parameterType": "formBinaryData",
+      "inputDataFieldName": "data"
+    }]
+  }
+}
+```
+
+### Troubleshooting Multimodal
+
+**Problem: Text blocks empty (0 characters)**
+- Cause: Using `block.get("content")` instead of `block.get("text")`
+- Solution: MinerU text blocks use `"text"` key
+- Fixed in commit `561918ab`
+
+**Problem: Documents saved as "unknown_source"**
+- Cause: Missing `file_paths` parameter in `rag.ainsert()`
+- Solution: Always pass `file_paths=filename`
+- Fixed in commit `04ebbdc9`
+
+**Problem: Only table chunks, no text chunks**
+- Cause: Inserting all content together causes improper chunking
+- Solution: Insert text and tables separately
+- Fixed in commit `54e18746`
+
+**Problem: "too many values to unpack (expected 2)"**
+- Cause: Modal processors return 3 values `(description, entities, chunk_info)`
+- Solution: Use `description, *_` instead of `description, _`
+- Fixed in commit `57878933`
+
+**Problem: MinerU killed (return code -9)**
+- Cause: Out of memory (OOM)
+- Solution: Increase Docker memory limit to 14G
+- Fixed in commit `b5676ad1`
+
+**Problem: Frontend checkbox not working**
+- Cause: Frontend not rebuilt after code changes
+- Workaround: Use API directly (works perfectly)
+- Status: Known issue, API is recommended approach
+
 ## Security
 
 - Never commit `.env` or `config.ini` with real credentials
