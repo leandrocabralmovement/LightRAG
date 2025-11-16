@@ -3043,27 +3043,29 @@ def create_document_routes(
                     else:
                         return rag.llm_model_func(prompt, system_prompt, history_messages, **kwargs)
 
-                # 6. Process images with Vision model
+                # 6. Process images with Vision model (DISABLED to save costs)
+                # Uncomment below to enable image processing with GPT-4o Vision
                 processed_images = 0
-                if image_blocks:
-                    image_processor = ImageModalProcessor(
-                        lightrag=rag,
-                        modal_caption_func=vision_func
-                    )
-
-                    for img_block in image_blocks:
-                        try:
-                            description, _ = await image_processor.process_multimodal_content(
-                                modal_content=img_block,
-                                content_type="image",
-                                file_path=file.filename
-                            )
-                            if description and description.strip():
-                                await rag.ainsert(description)
-                                processed_images += 1
-                                logger.info(f"Processed image {processed_images}/{len(image_blocks)}")
-                        except Exception as e:
-                            logger.warning(f"Failed to process image: {str(e)}")
+                # if image_blocks:
+                #     image_processor = ImageModalProcessor(
+                #         lightrag=rag,
+                #         modal_caption_func=vision_func
+                #     )
+                #
+                #     for img_block in image_blocks:
+                #         try:
+                #             description, *_ = await image_processor.process_multimodal_content(
+                #                 modal_content=img_block,
+                #                 content_type="image",
+                #                 file_path=file.filename
+                #             )
+                #             if description and description.strip():
+                #                 await rag.ainsert(description)
+                #                 processed_images += 1
+                #                 logger.info(f"Processed image {processed_images}/{len(image_blocks)}")
+                #         except Exception as e:
+                #             logger.warning(f"Failed to process image: {str(e)}")
+                logger.info(f"Image processing disabled (skipped {len(image_blocks)} images)")
 
                 # 7. Process tables
                 processed_tables = 0
@@ -3075,7 +3077,7 @@ def create_document_routes(
 
                     for table_block in table_blocks:
                         try:
-                            description, _ = await table_processor.process_multimodal_content(
+                            description, *_ = await table_processor.process_multimodal_content(
                                 modal_content=table_block,
                                 content_type="table",
                                 file_path=file.filename
@@ -3097,7 +3099,7 @@ def create_document_routes(
 
                     for eq_block in equation_blocks:
                         try:
-                            description, _ = await equation_processor.process_multimodal_content(
+                            description, *_ = await equation_processor.process_multimodal_content(
                                 modal_content=eq_block,
                                 content_type="equation",
                                 file_path=file.filename
