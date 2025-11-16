@@ -2976,10 +2976,8 @@ def create_document_routes(
 
                 logger.info(f"[{filename}] Content: {len(text_blocks)} text, {len(image_blocks)} images, {len(table_blocks)} tables, {len(equation_blocks)} equations")
 
-                # Collect text content
-                all_content = []
-                if text_blocks:
-                    all_content.extend(text_blocks)
+                # We will insert text and multimodal content SEPARATELY
+                # This prevents text from being lost when combined with large tables
 
                 # Process tables in parallel
                 processed_tables = 0
@@ -3007,7 +3005,6 @@ def create_document_routes(
                     table_descriptions = await asyncio.gather(*table_tasks)
 
                     valid_tables = [desc for desc in table_descriptions if desc]
-                    all_content.extend(valid_tables)
                     processed_tables = len(valid_tables)
                     logger.info(f"[{filename}] Processed {processed_tables}/{len(table_blocks)} tables")
 
@@ -3037,27 +3034,44 @@ def create_document_routes(
                     equation_descriptions = await asyncio.gather(*equation_tasks)
 
                     valid_equations = [desc for desc in equation_descriptions if desc]
-                    all_content.extend(valid_equations)
                     processed_equations = len(valid_equations)
                     logger.info(f"[{filename}] Processed {processed_equations}/{len(equation_blocks)} equations")
 
-                # Insert all content as single document
-                if all_content:
-                    full_document = "\n\n---\n\n".join(all_content)
-                    # Move file to permanent location
-                    final_file = doc_manager_instance.input_dir / sanitized_name
-                    if temp_file.exists():
-                        temp_file.rename(final_file)
+                # Move file to permanent location FIRST
+                final_file = doc_manager_instance.input_dir / sanitized_name
+                if temp_file.exists():
+                    temp_file.rename(final_file)
 
-                    # Insert with correct filename
-                    await rag_instance.ainsert(full_document, file_paths=filename)
-                    logger.info(f"[{filename}] ✅ Complete! {len(all_content)} blocks, {processed_tables} tables, {processed_equations} equations")
+                total_inserts = 0
+
+                # Insert TEXT first (LightRAG will do proper chunking)
+                if text_blocks:
+                    full_text = "\n\n".join(text_blocks)
+                    if full_text.strip():
+                        await rag_instance.ainsert(full_text, file_paths=filename)
+                        total_inserts += 1
+                        logger.info(f"[{filename}] Inserted text content ({len(text_blocks)} text blocks)")
+
+                # Insert each TABLE separately (each becomes 1 chunk)
+                if processed_tables > 0 and 'valid_tables' in locals():
+                    for i, table_desc in enumerate(valid_tables):
+                        if table_desc and table_desc.strip():
+                            await rag_instance.ainsert(table_desc, file_paths=filename)
+                            total_inserts += 1
+                            logger.info(f"[{filename}] Inserted table {i+1}/{processed_tables}")
+
+                # Insert each EQUATION separately (each becomes 1 chunk)
+                if processed_equations > 0 and 'valid_equations' in locals():
+                    for i, eq_desc in enumerate(valid_equations):
+                        if eq_desc and eq_desc.strip():
+                            await rag_instance.ainsert(eq_desc, file_paths=filename)
+                            total_inserts += 1
+                            logger.info(f"[{filename}] Inserted equation {i+1}/{processed_equations}")
+
+                if total_inserts > 0:
+                    logger.info(f"[{filename}] ✅ Complete! {total_inserts} insertions ({len(text_blocks)} text, {processed_tables} tables, {processed_equations} equations)")
                 else:
-                    # No content, still move file
-                    final_file = doc_manager_instance.input_dir / sanitized_name
-                    if temp_file.exists():
-                        temp_file.rename(final_file)
-                    logger.warning(f"[{filename}] No content extracted")
+                    logger.warning(f"[{filename}] ⚠️ No content inserted")
 
             except Exception as e:
                 logger.error(f"[{filename}] ❌ Processing failed: {str(e)}")
