@@ -3055,6 +3055,7 @@ def create_document_routes(
                         try:
                             description, _ = await image_processor.process_multimodal_content(
                                 modal_content=img_block,
+                                content_type="image",
                                 file_path=file.filename
                             )
                             if description and description.strip():
@@ -3076,6 +3077,7 @@ def create_document_routes(
                         try:
                             description, _ = await table_processor.process_multimodal_content(
                                 modal_content=table_block,
+                                content_type="table",
                                 file_path=file.filename
                             )
                             if description and description.strip():
@@ -3097,6 +3099,7 @@ def create_document_routes(
                         try:
                             description, _ = await equation_processor.process_multimodal_content(
                                 modal_content=eq_block,
+                                content_type="equation",
                                 file_path=file.filename
                             )
                             if description and description.strip():
