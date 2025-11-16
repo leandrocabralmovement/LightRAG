@@ -2966,7 +2966,8 @@ def create_document_routes(
                 for block in content_list:
                     content_type = block.get("type", "")
                     if content_type == "text":
-                        text_blocks.append(block.get("content", ""))
+                        # MinerU uses "text" key, not "content"!
+                        text_blocks.append(block.get("text", ""))
                     elif content_type == "image":
                         image_blocks.append(block)
                     elif content_type == "table":
